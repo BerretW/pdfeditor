@@ -171,5 +171,6 @@ cython_debug/
 .pypirc
 .vscode
 
+/output
 pdf_data.json
 *.pdf
