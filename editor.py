@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QListWidget, QLineEdit, QFileDialog,
     QMessageBox, QDialog, QSpinBox, QScrollArea,
     QGridLayout, QFrame, QCheckBox, QComboBox, QTextEdit, QAbstractItemView,
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QListWidgetItem
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QEvent, QPoint, QMimeData
 from PyQt5.QtGui import QIcon, QPixmap, QImage, QFont, QDrag
@@ -22,6 +22,7 @@ from BulkRenameDialog import BulkRenameDialog
 
 from InsertPagesDialog import InsertPagesDialog
 
+from MergePDFDialog import MergePDFDialog
 # --- Klikací label (pro náhledy) ---
 class ClickableLabel(QLabel):
     clicked = pyqtSignal()
@@ -117,7 +118,7 @@ class PDFManagerWindow(QMainWindow):
 
         # Přidáno tlačítko pro sloučení PDF souborů
         self.merge_button = QPushButton("Sloučit PDF", self)
-        self.merge_button.clicked.connect(self.merge_pdfs)
+        self.merge_button.clicked.connect(self.open_merge_dialog)
         top_layout.addWidget(self.merge_button)
 
         top_layout.addWidget(QLabel("Velikost náhledu:", self))
@@ -153,58 +154,63 @@ class PDFManagerWindow(QMainWindow):
         self.page_detail_label = QLabel("", self)
         action_layout.addWidget(self.page_detail_label)
         self.delete_pages_button = QPushButton("Odebrat vybrané stránky", self)
-        self.delete_pages_button.clicked.connect(self.delete_selected_pages)
         action_layout.addWidget(self.delete_pages_button)
+        self.delete_pages_button.clicked.connect(self.delete_selected_pages)
         self.apply_deletions_button = QPushButton("Aplikovat odstranění stran", self)
-        self.apply_deletions_button.clicked.connect(self.apply_deleted_pages)
         action_layout.addWidget(self.apply_deletions_button)
+        self.apply_deletions_button.clicked.connect(self.apply_deleted_pages)
         self.insert_pages_button = QPushButton("Vložit stránky", self)
-        self.insert_pages_button.clicked.connect(self.insert_pages_dialog)
         action_layout.addWidget(self.insert_pages_button)
+        self.insert_pages_button.clicked.connect(self.insert_pages_dialog)
         # Uložit automaticky přepíše původní soubor
         self.save_button = QPushButton("Uložit (auto overwrite)", self)
-        self.save_button.clicked.connect(self.auto_save_pdf)
         action_layout.addWidget(self.save_button)
+        self.save_button.clicked.connect(self.auto_save_pdf)
         main_area_layout.addLayout(action_layout, 1)
         main_layout.addLayout(main_area_layout)
         central_widget.setLayout(main_layout)
         self.update_pdf_list()
-    
-    def merge_pdfs(self):
+
+    def open_merge_dialog(self):
         selected_items = self.pdf_list.selectedItems()
         if len(selected_items) < 2:
             QMessageBox.warning(self, "Varování", "Vyberte alespoň dva PDF soubory pro sloučení.")
             return
 
-        file_paths = [self.database[item.text()]["path"] for item in selected_items]
-        output_path, _ = QFileDialog.getSaveFileName(self, "Uložit sloučené PDF", "", "PDF Files (*.pdf)")
+        dialog = MergePDFDialog(self, [item.text() for item in selected_items])
+        if dialog.exec_() == QDialog.Accepted:
+            file_names = dialog.get_file_order()
+            output_path = dialog.get_output_path()
+            if output_path:
+                self.merge_pdfs(file_names, output_path)
 
-        if output_path:
-            try:
-                pdf_writer = PyPDF2.PdfWriter()
-                for file_path in file_paths:
-                    with open(file_path, 'rb') as pdf_file:
-                        pdf_reader = PyPDF2.PdfReader(pdf_file)
-                        for page in pdf_reader.pages:
-                            pdf_writer.add_page(page)
+    def merge_pdfs(self, file_names, output_path):
+        try:
+            pdf_writer = PyPDF2.PdfWriter()
+            for file_name in file_names:
+                file_path = self.database[file_name]["path"]
+                with open(file_path, 'rb') as pdf_file:
+                    pdf_reader = PyPDF2.PdfReader(pdf_file)
+                    for page in pdf_reader.pages:
+                        pdf_writer.add_page(page)
 
-                with open(output_path, 'wb') as output_file:
-                    pdf_writer.write(output_file)
-                
-                # Add the merged PDF to the database
-                file_name = os.path.basename(output_path)
-                self.database[file_name] = {
-                    "path": os.path.abspath(output_path),
-                    "num_pages": len(pdf_writer.pages),
-                    "deleted_pages": [],
-                    "inserted_pages": []
-                }
-                self.save_database()
-                self.update_pdf_list()
+            with open(output_path, 'wb') as output_file:
+                pdf_writer.write(output_file)
 
-                QMessageBox.information(self, "Úspěch", f"Soubory byly sloučeny do:\n{output_path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Chyba", f"Chyba při slučování PDF souborů: {e}")
+            # Add the merged PDF to the database
+            file_name = os.path.basename(output_path)
+            self.database[file_name] = {
+                "path": os.path.abspath(output_path),
+                "num_pages": len(pdf_writer.pages),
+                "deleted_pages": [],
+                "inserted_pages": []
+            }
+            self.save_database()
+            self.update_pdf_list()
+
+            QMessageBox.information(self, "Úspěch", f"Soubory byly sloučeny do:\n{output_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Chyba", f"Chyba při slučování PDF souborů: {e}")
 
 
     # --- Vytvoření nového PDF ---
@@ -681,7 +687,6 @@ class PDFManagerWindow(QMainWindow):
                     QMessageBox.critical(self, "Chyba", f"Chyba při přejmenování {file_name}: {e}")
         self.save_database()
         QMessageBox.information(self, "Úspěch", "Soubory byly přejmenovány")
-
 
 
 if __name__ == "__main__":
