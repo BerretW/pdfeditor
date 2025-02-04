@@ -17,6 +17,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 import fitz
 from ImageCropDialog import ImageCropDialog
+
+from BulkRenameDialog import BulkRenameDialog
+
+from InsertPagesDialog import InsertPagesDialog
+
 # --- Klikací label (pro náhledy) ---
 class ClickableLabel(QLabel):
     clicked = pyqtSignal()
@@ -110,6 +115,11 @@ class PDFManagerWindow(QMainWindow):
         self.rename_button.clicked.connect(self.bulk_rename_dialog)
         top_layout.addWidget(self.rename_button)
 
+        # Přidáno tlačítko pro sloučení PDF souborů
+        self.merge_button = QPushButton("Sloučit PDF", self)
+        self.merge_button.clicked.connect(self.merge_pdfs)
+        top_layout.addWidget(self.merge_button)
+
         top_layout.addWidget(QLabel("Velikost náhledu:", self))
         self.size_combo = QComboBox(self)
         self.size_combo.addItem("Malý", 100)
@@ -159,6 +169,43 @@ class PDFManagerWindow(QMainWindow):
         main_layout.addLayout(main_area_layout)
         central_widget.setLayout(main_layout)
         self.update_pdf_list()
+    
+    def merge_pdfs(self):
+        selected_items = self.pdf_list.selectedItems()
+        if len(selected_items) < 2:
+            QMessageBox.warning(self, "Varování", "Vyberte alespoň dva PDF soubory pro sloučení.")
+            return
+
+        file_paths = [self.database[item.text()]["path"] for item in selected_items]
+        output_path, _ = QFileDialog.getSaveFileName(self, "Uložit sloučené PDF", "", "PDF Files (*.pdf)")
+
+        if output_path:
+            try:
+                pdf_writer = PyPDF2.PdfWriter()
+                for file_path in file_paths:
+                    with open(file_path, 'rb') as pdf_file:
+                        pdf_reader = PyPDF2.PdfReader(pdf_file)
+                        for page in pdf_reader.pages:
+                            pdf_writer.add_page(page)
+
+                with open(output_path, 'wb') as output_file:
+                    pdf_writer.write(output_file)
+                
+                # Add the merged PDF to the database
+                file_name = os.path.basename(output_path)
+                self.database[file_name] = {
+                    "path": os.path.abspath(output_path),
+                    "num_pages": len(pdf_writer.pages),
+                    "deleted_pages": [],
+                    "inserted_pages": []
+                }
+                self.save_database()
+                self.update_pdf_list()
+
+                QMessageBox.information(self, "Úspěch", f"Soubory byly sloučeny do:\n{output_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Chyba", f"Chyba při slučování PDF souborů: {e}")
+
 
     # --- Vytvoření nového PDF ---
     def create_new_pdf(self):
@@ -635,71 +682,7 @@ class PDFManagerWindow(QMainWindow):
         self.save_database()
         QMessageBox.information(self, "Úspěch", "Soubory byly přejmenovány")
 
-# --- Dialog pro vkládání stránek ---
-class InsertPagesDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Vložit stránky")
-        self.layout = QVBoxLayout()
-        self.file_button = QPushButton("Vyberte PDF nebo obrázek", self)
-        self.file_button.clicked.connect(self.select_file)
-        self.file_path = None
-        self.layout.addWidget(self.file_button)
-        self.page_number_label = QLabel("Zadejte číslo stránky před kterou chcete vložit:", self)
-        self.page_number_input = QSpinBox(self)
-        self.page_number_input.setMinimum(1)
-        self.layout.addWidget(self.page_number_label)
-        self.layout.addWidget(self.page_number_input)
-        self.insert_type_label = QLabel("Typ vkládaného souboru:", self)
-        self.insert_type_combo = QComboBox(self)
-        self.insert_type_combo.addItem("pdf")
-        self.insert_type_combo.addItem("image")
-        self.layout.addWidget(self.insert_type_label)
-        self.layout.addWidget(self.insert_type_combo)
-        button_layout = QHBoxLayout()
-        self.ok_button = QPushButton("OK", self)
-        self.ok_button.clicked.connect(self.accept)
-        button_layout.addWidget(self.ok_button)
-        self.cancel_button = QPushButton("Zrušit", self)
-        self.cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(self.cancel_button)
-        self.layout.addLayout(button_layout)
-        self.setLayout(self.layout)
 
-    def select_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Vyberte PDF nebo obrázek", "", "PDF Files (*.pdf);;Image Files (*.png *.jpg *.jpeg)")
-        if file_path:
-            self.file_path = os.path.abspath(file_path)
-
-    def get_insert_params(self):
-        return self.file_path, self.page_number_input.value(), self.insert_type_combo.currentText()
-
-# --- Dialog pro hromadné přejmenování ---
-class BulkRenameDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Hromadné přejmenování")
-        self.layout = QVBoxLayout()
-        self.label_pattern = QLabel("Vzor:", self)
-        self.input_pattern = QLineEdit(self)
-        self.layout.addWidget(self.label_pattern)
-        self.layout.addWidget(self.input_pattern)
-        self.label_new_pattern = QLabel("Nový vzor:", self)
-        self.input_new_pattern = QLineEdit(self)
-        self.layout.addWidget(self.label_new_pattern)
-        self.layout.addWidget(self.input_new_pattern)
-        button_layout = QHBoxLayout()
-        self.ok_button = QPushButton("OK", self)
-        self.ok_button.clicked.connect(self.accept)
-        button_layout.addWidget(self.ok_button)
-        self.cancel_button = QPushButton("Zrušit", self)
-        self.cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(self.cancel_button)
-        self.layout.addLayout(button_layout)
-        self.setLayout(self.layout)
-
-    def get_rename_params(self):
-        return self.input_pattern.text(), self.input_new_pattern.text()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

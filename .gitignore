@@ -172,3 +172,4 @@ cython_debug/
 .vscode
 
 pdf_data.json
+*.pdf
