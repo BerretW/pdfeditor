@@ -17,20 +17,21 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 import fitz
 from ImageCropDialog import ImageCropDialog
-
 from BulkRenameDialog import BulkRenameDialog
-
 from InsertPagesDialog import InsertPagesDialog
-
 from MergePDFDialog import MergePDFDialog
+import pytesseract
+from PIL import Image
+
+
+
+
 # --- Klikací label (pro náhledy) ---
 class ClickableLabel(QLabel):
     clicked = pyqtSignal()
     def mousePressEvent(self, event):
         self.clicked.emit()
         super().mousePressEvent(event)
-
-
 
 # --- Widget pro zobrazení stránky (bez drag & drop) ---
 class PageThumbnail(QFrame):
@@ -70,7 +71,6 @@ class NewPDFDialog(QDialog):
         button_layout.addWidget(cancel_button)
         layout.addLayout(button_layout)
         self.setLayout(layout)
-
     def getPageCount(self):
         return self.spin_pages.value()
 
@@ -94,7 +94,7 @@ class PDFManagerWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout()
 
-        # Horní lišta – přidáno tlačítko Nové PDF
+        # Horní lišta – tlačítka
         top_layout = QHBoxLayout()
         self.new_pdf_button = QPushButton("Nové PDF", self)
         self.new_pdf_button.clicked.connect(self.create_new_pdf)
@@ -116,7 +116,6 @@ class PDFManagerWindow(QMainWindow):
         self.rename_button.clicked.connect(self.bulk_rename_dialog)
         top_layout.addWidget(self.rename_button)
 
-        # Přidáno tlačítko pro sloučení PDF souborů
         self.merge_button = QPushButton("Sloučit PDF", self)
         self.merge_button.clicked.connect(self.open_merge_dialog)
         top_layout.addWidget(self.merge_button)
@@ -162,7 +161,18 @@ class PDFManagerWindow(QMainWindow):
         self.insert_pages_button = QPushButton("Vložit stránky", self)
         action_layout.addWidget(self.insert_pages_button)
         self.insert_pages_button.clicked.connect(self.insert_pages_dialog)
-        # Uložit automaticky přepíše původní soubor
+        
+        # Tlačítko pro OCR a regeneraci textu
+        self.ocr_button = QPushButton("OCR a regenerace stránky", self)
+        self.ocr_button.clicked.connect(lambda: self.ocr_and_regenerate_page(1))
+        action_layout.addWidget(self.ocr_button)
+        
+        # Tlačítko pro odstranění pozadí
+        self.remove_background_button = QPushButton("Odstranit pozadí", self)
+        action_layout.addWidget(self.remove_background_button)
+        self.remove_background_button.clicked.connect(self.remove_background_pages)
+        
+        # Uložit (přepíše původní soubor)
         self.save_button = QPushButton("Uložit (auto overwrite)", self)
         action_layout.addWidget(self.save_button)
         self.save_button.clicked.connect(self.auto_save_pdf)
@@ -193,11 +203,9 @@ class PDFManagerWindow(QMainWindow):
                     pdf_reader = PyPDF2.PdfReader(pdf_file)
                     for page in pdf_reader.pages:
                         pdf_writer.add_page(page)
-
             with open(output_path, 'wb') as output_file:
                 pdf_writer.write(output_file)
-
-            # Add the merged PDF to the database
+            # Přidáme sloučené PDF do databáze
             file_name = os.path.basename(output_path)
             self.database[file_name] = {
                 "path": os.path.abspath(output_path),
@@ -207,13 +215,137 @@ class PDFManagerWindow(QMainWindow):
             }
             self.save_database()
             self.update_pdf_list()
-
             QMessageBox.information(self, "Úspěch", f"Soubory byly sloučeny do:\n{output_path}")
         except Exception as e:
             QMessageBox.critical(self, "Chyba", f"Chyba při slučování PDF souborů: {e}")
 
+    def remove_background_from_image(self, image):
+        """Projde QImage a nastaví pixely blízko bílé jako transparentní."""
+        image = image.convertToFormat(QImage.Format_ARGB32)
+        width = image.width()
+        height = image.height()
+        threshold = 240  # prahová hodnota pro bílou
+        for x in range(width):
+            for y in range(height):
+                color = image.pixelColor(x, y)
+                if color.red() >= threshold and color.green() >= threshold and color.blue() >= threshold:
+                    color.setAlpha(0)
+                    image.setPixelColor(x, y, color)
+        return image
 
-    # --- Vytvoření nového PDF ---
+    def remove_background_pages(self):
+        if not self.selected_pdf:
+            QMessageBox.warning(self, "Varování", "Vyberte PDF soubor.")
+            return
+
+        selected_pages = []
+        # Projdi všechny miniatury a zjisti, které stránky mají zaškrtnutý checkbox
+        for i in range(self.pages_layout.count()):
+            widget = self.pages_layout.itemAt(i).widget()
+            if widget and hasattr(widget, "checkbox") and widget.checkbox.isChecked():
+                selected_pages.append(widget.page_number)
+
+        if not selected_pages:
+            QMessageBox.information(self, "Informace", "Nevybral jste žádné stránky pro odstranění pozadí.")
+            return
+
+        reply = QMessageBox.question(self, "Potvrdit", 
+                                     f"Opravdu chcete odstranit pozadí na stránkách {selected_pages}?",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            pdf_path = self.database[self.selected_pdf]["path"]
+            with open(pdf_path, 'rb') as f:
+                pdf_reader = PyPDF2.PdfReader(f)
+                pdf_writer = PyPDF2.PdfWriter()
+                # Použijeme PyMuPDF pro vykreslení stránek jako obrázků
+                doc = fitz.open(pdf_path)
+                for i, page in enumerate(pdf_reader.pages):
+                    page_number = i + 1
+                    if page_number in selected_pages:
+                        fitz_page = doc[i]
+                        pix = fitz_page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                        fmt = QImage.Format_RGBA8888 if pix.alpha else QImage.Format_RGB888
+                        image = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt)
+                        processed_image = self.remove_background_from_image(image)
+                        temp_img_path = os.path.join(tempfile.gettempdir(), f"processed_{page_number}.png")
+                        processed_image.save(temp_img_path, "PNG")
+                        temp_pdf_path = os.path.join(tempfile.gettempdir(), f"processed_{page_number}.pdf")
+                        c = canvas.Canvas(temp_pdf_path, pagesize=A4)
+                        c.drawImage(temp_img_path, 0, 0, A4[0], A4[1], mask='auto')
+                        c.save()
+                        with open(temp_pdf_path, 'rb') as temp_pdf_file:
+                            temp_pdf_reader = PyPDF2.PdfReader(temp_pdf_file)
+                            new_page = temp_pdf_reader.pages[0]
+                            pdf_writer.add_page(new_page)
+                        os.remove(temp_img_path)
+                        os.remove(temp_pdf_path)
+                    else:
+                        pdf_writer.add_page(page)
+                doc.close()
+
+            with open(pdf_path, 'wb') as f_out:
+                pdf_writer.write(f_out)
+            self.database[self.selected_pdf]["num_pages"] = len(pdf_writer.pages)
+            self.save_database()
+            QMessageBox.information(self, "Úspěch", "Pozadí bylo odstraněno z vybraných stránek a PDF byl přepsán.")
+            self.show_pdf_details(self.pdf_list.currentItem())
+        except Exception as e:
+            QMessageBox.critical(self, "Chyba", f"Chyba při odstraňování pozadí: {e}")
+
+    def ocr_and_regenerate_page(self, page_number):
+        try:
+            pdf_path = self.database[self.selected_pdf]["path"]
+            # Načteme stránku pomocí PyMuPDF (fitz)
+            doc = fitz.open(pdf_path)
+            page = doc[page_number - 1]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            mode = "RGBA" if pix.alpha else "RGB"
+            image = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+            # Spustíme OCR – ujisti se, že Tesseract je správně nainstalován a nastaven
+            ocr_text = pytesseract.image_to_string(image, lang='ces')
+            doc.close()
+
+            if not ocr_text.strip():
+                QMessageBox.warning(self, "OCR Výsledek", "OCR nevyprodukoval žádný text.")
+                return
+
+            # Vytvoříme dočasný PDF soubor s textem pomocí ReportLabu
+            temp_pdf_path = os.path.join(tempfile.gettempdir(), f"ocr_page_{page_number}.pdf")
+            c = canvas.Canvas(temp_pdf_path, pagesize=A4)
+            y = A4[1] - 50
+            for line in ocr_text.splitlines():
+                c.drawString(50, y, line)
+                y -= 15
+            c.save()
+
+            with open(pdf_path, 'rb') as f:
+                pdf_reader = PyPDF2.PdfReader(f)
+                pdf_writer = PyPDF2.PdfWriter()
+
+            from io import BytesIO
+            with open(temp_pdf_path, 'rb') as temp_pdf_file:
+                pdf_bytes = temp_pdf_file.read()
+            new_page_reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+
+            for i, p in enumerate(pdf_reader.pages):
+                if i == page_number - 1:
+                    pdf_writer.add_page(new_page_reader.pages[0])
+                else:
+                    pdf_writer.add_page(p)
+
+            with open(pdf_path, "wb") as f_out:
+                pdf_writer.write(f_out)
+            os.remove(temp_pdf_path)
+
+            QMessageBox.information(self, "Úspěch",
+                                    f"OCR a regenerace textu pro stránku {page_number} proběhla úspěšně.")
+            self.show_pdf_details(self.pdf_list.currentItem())
+        except Exception as e:
+            QMessageBox.critical(self, "Chyba", f"Chyba při OCR/regeneraci: {e}")
+
     def create_new_pdf(self):
         dialog = NewPDFDialog(self)
         if dialog.exec_() == QDialog.Accepted:
@@ -245,7 +377,6 @@ class PDFManagerWindow(QMainWindow):
             else:
                 os.unlink(tmp_path)
 
-    # --- Funkce pro hromadné přidání PDF souborů ---
     def add_bulk_pdfs(self):
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Vyberte PDF soubory", "", "PDF Files (*.pdf)")
         if not file_paths:
@@ -271,7 +402,6 @@ class PDFManagerWindow(QMainWindow):
         self.update_pdf_list()
         QMessageBox.information(self, "PDF Přidáno", f"Přidáno bylo {added} souborů.")
 
-    # --- Event filter pro plovoucí náhled ---
     def eventFilter(self, obj, event):
         if obj == self.pdf_list.viewport():
             if event.type() == QEvent.MouseMove:
@@ -351,15 +481,13 @@ class PDFManagerWindow(QMainWindow):
             try:
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext == ".png":
-                    # Pokud je PNG, nejprve otevřeme editor obrázků pro oříznutí
+                    # Pokud je PNG, otevřeme editor obrázků pro oříznutí
                     pixmap = QPixmap(file_path)
                     crop_dialog = ImageCropDialog(pixmap, self)
                     if crop_dialog.exec_() == QDialog.Accepted:
                         cropped = crop_dialog.getCroppedPixmap()
-                        # Uložíme oříznutý obrázek do dočasného souboru
                         temp_img_path = os.path.join(tempfile.gettempdir(), "cropped.png")
                         cropped.save(temp_img_path, "PNG")
-                        # Vytvoříme PDF stránku z oříznutého obrázku pomocí ReportLabu
                         new_pdf_path = os.path.join(tempfile.gettempdir(), "converted.png.pdf")
                         c = canvas.Canvas(new_pdf_path, pagesize=A4)
                         c.drawImage(temp_img_path, 0, 0, A4[0], A4[1], mask='auto')
@@ -493,7 +621,6 @@ class PDFManagerWindow(QMainWindow):
         except Exception as e:
             initial_text = ""
             QMessageBox.warning(self, "Chyba", f"Chyba při načítání textu: {e}")
-       
 
     def replace_page_in_pdf(self, file_name, page_number, new_text):
         try:
@@ -618,23 +745,18 @@ class PDFManagerWindow(QMainWindow):
                     )
                     self.save_database()
                 elif insert_type == "image":
-                    # Načteme obrázek pomocí QPixmap (pro podporu průhlednosti)
                     pixmap = QPixmap(new_pages_path)
-                    # Otevřeme editor obrázků pro oříznutí
                     crop_dialog = ImageCropDialog(pixmap, self)
                     if crop_dialog.exec_() == QDialog.Accepted:
                         cropped = crop_dialog.getCroppedPixmap()
-                        # Uložíme oříznutý obrázek do dočasného souboru
                         temp_img_path = os.path.join(tempfile.gettempdir(), "cropped.png")
                         cropped.save(temp_img_path, "PNG")
-                        # Vytvoříme PDF stránku z oříznutého obrázku
                         page_size = A4
                         fd, tmp_pdf_path = tempfile.mkstemp(suffix=".pdf")
                         os.close(fd)
                         c = canvas.Canvas(tmp_pdf_path, pagesize=A4)
                         c.drawImage(temp_img_path, 0, 0, page_size[0], page_size[1], mask='auto')
                         c.save()
-                        # Zavoláme rekurzivně insert_pages s novým PDF a typem "pdf"
                         self.insert_pages(file_name, tmp_pdf_path, page_number_to_insert_before, "pdf")
                         os.unlink(temp_img_path)
                         os.unlink(tmp_pdf_path)
@@ -687,7 +809,6 @@ class PDFManagerWindow(QMainWindow):
                     QMessageBox.critical(self, "Chyba", f"Chyba při přejmenování {file_name}: {e}")
         self.save_database()
         QMessageBox.information(self, "Úspěch", "Soubory byly přejmenovány")
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
